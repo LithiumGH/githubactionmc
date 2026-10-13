@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>GitHubActionMC Launcher</title>
+<style>
+:root{color-scheme:dark}body{background:#14161a;color:#eee;font-family:system-ui,sans-serif;margin:0}
+header{background:#1f7a33;padding:14px 18px;font-weight:800;font-size:20px}
+main{max-width:860px;margin:0 auto;padding:16px}
+.card{background:#1d2126;border:1px solid #333;border-radius:10px;padding:14px;margin:12px 0}
+label{display:block;margin:8px 0 4px;font-size:13px;color:#bbb}
+input,select,button{font-size:15px;padding:8px 10px;border-radius:8px;border:1px solid #444;background:#111;color:#eee;width:100%;box-sizing:border-box}
+button{background:#2f9e44;border:none;font-weight:700;cursor:pointer;margin-top:10px}
+button.ghost{background:#333}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+pre{background:#000;padding:10px;border-radius:8px;overflow:auto;max-height:300px;font-size:12px}
+.tabs{display:flex;gap:8px;margin:10px 0}
+.tabs button{width:auto;padding:8px 14px}
+.note{font-size:13px;color:#bbb}
+a{color:#7ddf92}
+</style>
+</head>
+<body>
+<header>⛏️ GitHubActionMC — custom launcher <span class="note">vanilla · fabric · forge · neoforge · quilt + Modrinth</span></header>
+<main>
+<div class="card" id="status">loading status…</div>
+<div class="tabs">
+<button onclick="show('play')">Play</button>
+<button onclick="show('mods')">Mods</button>
+<button onclick="show('pack')">Modpack</button>
+<button onclick="show('logs')">Logs</button>
+</div>
+
+<div class="card" id="tab-play">
+<h3>Install &amp; Play</h3>
+<div class="row">
+<div><label>Minecraft version</label><input id="mc" value="1.21" list="vers"/><datalist id="vers"></datalist></div>
+<div><label>Loader</label><select id="loader"><option>fabric</option><option>vanilla</option><option>forge</option><option>neoforge</option><option>quilt</option></select></div>
+</div>
+<div class="row">
+<div><label>Loader version (latest = blank)</label><input id="lver" placeholder="latest"/></div>
+<div><label>Username (offline name — you must own the game for online play)</label><input id="user" value="Player"/></div>
+</div>
+<div class="row">
+<div><label>RAM (≤5120M on free runners)</label><input id="ram" value="4096M"/></div>
+<div><label>Resolution</label><input id="res" value="1280x720"/></div>
+</div>
+<button onclick="install()">1 · Install version</button>
+<button class="ghost" onclick="perf()">+ one-click FPS mods (Sodium/Embeddium, FerriteCore…)</button>
+<button onclick="launch()">2 · Launch game (watch it in the noVNC tab/URL)</button>
+<button class="ghost" onclick="stop()">Stop game</button>
+<div class="note">FakeGPU (Mesa llvmpipe/Zink) is auto-applied. For FPS: render distance 6–8, graphics Fast, VSync off. Game runs headless on <code>:99</code>, view via noVNC <code>:6080</code>.</div>
+</div>
+
+<div class="card" id="tab-mods" style="display:none">
+<h3>Modrinth mods</h3>
+<label>Search</label><input id="q" placeholder="e.g. sodium"/>
+<button onclick="search()">Search Modrinth</button>
+<div id="hits"></div>
+</div>
+
+<div class="card" id="tab-pack" style="display:none">
+<h3>Modpack (.mrpack)</h3>
+<label>Paste Modrinth .mrpack URL</label><input id="packurl" placeholder="https://…/pack.mrpack"/>
+<button onclick="mrpack()">Install modpack</button>
+<div class="note">Installs client mods + overrides/ into the instance.</div>
+</div>
+
+<div class="card" id="tab-logs" style="display:none">
+<h3>Logs</h3>
+<button class="ghost" onclick="logs()">Refresh game log</button>
+<pre id="log"></pre>
+</div>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+function show(t){for(const x of['play','mods','pack','logs'])$('tab-'+x).style.display=x===t?'':'none'}
+async function api(p,m,b){const r=await fetch(p,{method:m||'GET',headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});return r.json()}
+async function status(){const s=await api('/api/status');$('status').innerHTML=`running pid: <b>${s.running||'—'}</b> · installed: <b>${s.last.mc||'?'} / ${s.last.loader||''}</b> · FakeGPU: <b>${s.fakegpu?'on':'off'}</b><br>state: ${JSON.stringify(s.state)}<br>tunnels: launcher <a href="${s.tunnels.launcher}">${s.tunnels.launcher}</a> · game <a href="${s.tunnels.vnc}/vnc.html">${s.tunnels.vnc}/vnc.html</a>`}
+async function install(){await api('/api/install','POST',{mc_version:$('mc').value,loader:$('loader').value,loader_version:$('lver').value||'latest'});alert('install started — watch status/logs');status()}
+async function launch(){const r=await api('/api/launch','POST',{mc_version:$('mc').value,loader:$('loader').value,username:$('user').value,ram:$('ram').value,resolution:$('res').value});alert(JSON.stringify(r));status()}
+async function stop(){alert(JSON.stringify(await api('/api/stop','POST',{})));status()}
+async function perf(){alert(JSON.stringify(await api('/api/mod','POST',{action:'perf',mc_version:$('mc').value,loader:$('loader').value})))}
+async function search(){const r=await api('/api/mod','POST',{action:'search',query:$('q').value,mc_version:$('mc').value,loader:$('loader').value});$('hits').innerHTML=r.hits.map(h=>`<div class="card"><b>${h.title}</b> <span class="note">${h.downloads} dl</span><br>${h.desc}<br><button onclick="inst('${h.slug}')">Install ${h.slug}</button></div>`).join('')}
+async function inst(s){alert(JSON.stringify(await api('/api/mod','POST',{action:'install',slug:s,mc_version:$('mc').value,loader:$('loader').value})))}
+async function mrpack(){alert(JSON.stringify(await api('/api/mrpack','POST',{url:$('packurl').value})));status()}
+async function logs(){const r=await api('/api/log?lines=120');$('log').textContent=r.lines.join('\n')}
+status();setInterval(status,10000);
+fetch('/api/versions').then(r=>r.json()).then(j=>{$('vers').innerHTML=j.versions.slice(0,30).map(v=>`<option>${v}</option>`).join('')});
+</script>
+</body>
+</html>

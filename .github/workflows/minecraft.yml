@@ -1,0 +1,75 @@
+name: Minecraft Browser Play
+
+on:
+  workflow_dispatch:
+    inputs:
+      mc_version:
+        description: "MC version (e.g. 1.21, 1.20.1, latest)"
+        default: "1.21"
+        required: true
+      loader:
+        description: "Loader"
+        default: "fabric"
+        type: choice
+        options: [vanilla, fabric, forge, neoforge, quilt]
+      loader_version:
+        description: "Loader version (latest = auto)"
+        default: "latest"
+      username:
+        description: "Offline username (must own the game for online use)"
+        default: "Player"
+      ram:
+        description: "Max RAM (e.g. 4096M)"
+        default: "4096M"
+      resolution:
+        description: "Game resolution"
+        default: "1280x720"
+      modpack_url:
+        description: "Optional Modrinth .mrpack URL"
+        default: ""
+      modrinth_mods:
+        description: "Comma mods (perf mods auto)"
+        default: "sodium,ferrite-core"
+      auto_launch:
+        description: "Auto-install + launch (else use Launcher UI)"
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  play:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360  # max for free runners (~6h)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Java 8/17/21 (MC needs all three eras)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y temurin-8-jdk temurin-17-jdk temurin-21-jdk 2>/dev/null || \
+            sudo apt-get install -y openjdk-8-jdk openjdk-17-jdk openjdk-21-jdk
+          /usr/lib/jvm/temurin-21-jdk-amd64/bin/java -version 2>&1 || java -version 2>&1
+        # If temurin repo missing, fallback:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: FakeGPU (virtual GL/Vulkan stack)
+        run: chmod +x scripts/*.sh && sudo bash scripts/setup-fakegpu.sh
+
+      - name: Headless desktop (Xvfb/VNC/noVNC/cloudflared)
+        run: sudo bash scripts/setup-desktop.sh
+
+      - name: Play (launcher UI + noVNC + tunnel, holds job)
+        env:
+          MC_VERSION: ${{ inputs.mc_version }}
+          LOADER: ${{ inputs.loader }}
+          LOADER_VERSION: ${{ inputs.loader_version }}
+          USERNAME: ${{ inputs.username }}
+          RAM: ${{ inputs.ram }}
+          RESOLUTION: ${{ inputs.resolution }}
+          MODPACK_URL: ${{ inputs.modpack_url }}
+          MODRINTH_MODS: ${{ inputs.modrinth_mods }}
+          AUTO_LAUNCH: ${{ inputs.auto_launch }}
+        run: bash scripts/start.sh
