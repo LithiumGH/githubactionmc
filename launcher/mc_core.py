@@ -60,22 +60,40 @@ def http_download(url, dest: Path, timeout=120):
 def mc_dir(base=None) -> Path:
     return Path(base or os.environ.get("MC_DIR") or Path.home() / "minecraft").resolve()
 
+_OS_NAME = "linux"  # runners are always Linux; keep single source of truth
+_OS_ARCH = {"x86_64": "64", "amd64": "64", "aarch64": "arm64", "arm64": "arm64"}.get(
+    platform.machine().lower(), "64")
+
+
 def rules_allow(rules) -> bool:
+    """Mojang rules semantics: last MATCHING rule wins; no match => disallow.
+    An os clause matches only when name == linux (and arch/version match).
+    A features clause never matches (we launch without demo/multiplayer flags)."""
     if not rules:
         return True
     allow = False
     for r in rules:
-        action = r.get("action") == "allow"
-        os_cond = (r.get("os") or {})
-        name = os_cond.get("name")
-        if name and name != "linux" and "osx" not in str(name):
-            if name not in ("linux",):
-                continue
-        # features (is_demo_user etc) — skip conditioned entries
+        cond = True
+        if "os" in r:
+            o = r.get("os") or {}
+            if "name" in o and o["name"] != _OS_NAME:
+                cond = False
+            if cond and "arch" in o:
+                want = str(o["arch"]).lower().replace("x86", "64")
+                if want not in (_OS_ARCH, platform.machine().lower()):
+                    # Mojang uses "64" for x86_64; be lenient
+                    if not (want == "64" and _OS_ARCH == "64"):
+                        cond = False
         if "features" in r:
-            continue
-        allow = action
+            cond = False
+        if cond:
+            allow = r.get("action") == "allow"
     return allow
+
+
+# JVM flags that only exist on one OS — never pass these on Linux even if
+# a rule slips through (e.g. older version jsons).
+_OS_BLOCKED_JVM = ("-XstartOnFirstThread", "-Xdock:name=", "-Xdock:icon=")
 
 def lib_path(lib_dir: Path, name: str) -> Path:
     parts = name.split(":")
@@ -562,6 +580,8 @@ def build_command(mc_version, loader="vanilla", username="Player", ram="4096M",
     if loader_prof:
         _merge_arg_list(jvm, [sub(a) if isinstance(a, str) else a for a in (loader_prof.get("arguments", {}).get("jvm", []) or [])])
     jvm += (extra_jvm or [])
+    # safety sweep: drop any macOS/Windows-only flags that slipped through
+    jvm = [a for a in jvm if not any(b in a for b in _OS_BLOCKED_JVM)]
     game = []
     args = vj.get("arguments", {}).get("game", []) or vj.get("minecraftArguments", "").split(" ")
     _merge_arg_list(game, [sub(a) if isinstance(a, str) else {"rules": a.get("rules"), "value": [sub(x) for x in v] if isinstance((v := a.get("value")), list) else sub(v) if isinstance(v, str) else v} for a in args])
