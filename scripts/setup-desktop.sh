@@ -20,6 +20,8 @@ if ! command -v cloudflared >/dev/null 2>&1; then
   curl -fsSL -o /tmp/cloudflared "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${CFARCH}"
   sudo install -m 755 /tmp/cloudflared /usr/local/bin/cloudflared
 fi
+cloudflared --version || { echo "[desktop] FATAL: cloudflared broken"; exit 1; }
+command -v npx >/dev/null 2>&1 || echo "[desktop] note: no npx — localtunnel fallback unavailable (tunnel fallback needs node)"
 
 # noVNC fallback download if package missing
 if [ ! -d /opt/novnc ] && [ ! -d /usr/share/novnc ]; then
