@@ -22,6 +22,14 @@ if ! command -v cloudflared >/dev/null 2>&1; then
 fi
 cloudflared --version || { echo "[desktop] FATAL: cloudflared broken"; exit 1; }
 command -v npx >/dev/null 2>&1 || echo "[desktop] note: no npx — localtunnel fallback unavailable (tunnel fallback needs node)"
+if ! command -v node >/dev/null 2>&1; then
+  echo "[desktop] installing nodejs for tunnel fallback..."
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get install -y --no-install-recommends nodejs npm || true
+  elif command -v dnf >/dev/null 2>&1; then
+    sudo dnf install -y nodejs npm || true
+  fi
+fi
 
 # noVNC fallback download if package missing
 if [ ! -d /opt/novnc ] && [ ! -d /usr/share/novnc ]; then

@@ -84,10 +84,12 @@ summarize() { # $1 text — also pin to the Actions job summary page
 # NOTE: must NOT use $(...) capture — background tunnel processes started
 # inside a command substitution can be killed when the subshell exits.
 open_tunnel() { # $1 port $2 name — sets ${2}_URL on success, returns 0/1
-  local port="$1" name="$2" log="/tmp/cf-$2.log" url=""
+  local port="$1" name="$2" log="/tmp/cf-$2.log" url="" extra=""
+  # --no-autoupdate was removed in newer cloudflared; only pass if supported
+  if cloudflared tunnel --help 2>&1 | grep -q "no-autoupdate"; then extra="--no-autoupdate"; fi
   echo "[tunnel:$name] starting cloudflared for :$port ..."
   rm -f "$log"
-  cloudflared tunnel --url "http://localhost:$port" --no-autoupdate >"$log" 2>&1 &
+  cloudflared tunnel --url "http://localhost:$port" $extra >"$log" 2>&1 &
   echo "$!" >"/tmp/cf-$name.pid"
   for i in $(seq 1 45); do
     url=$(grep -Eo 'https://[A-Za-z0-9-]+\.trycloudflare\.com' "$log" 2>/dev/null | head -1)
@@ -100,8 +102,14 @@ open_tunnel() { # $1 port $2 name — sets ${2}_URL on success, returns 0/1
   done
   if [ -z "$url" ]; then
     echo "[tunnel:$name] FAILED (cloudflared log tail):"; tail -30 "$log" || true
+    if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+      { echo "### tunnel:$name FAILED"; echo '```'; tail -30 "$log" || true; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+    fi
     if grep -qi "429\|rate.limit\|too many" "$log" 2>/dev/null; then
       echo "[tunnel:$name] Cloudflare rate-limited this runner IP (common on shared Actions IPs)."
+    fi
+    if grep -qi "unknown flag\|invalid flag\|no such flag" "$log" 2>/dev/null; then
+      echo "[tunnel:$name] cloudflared rejected a CLI flag — update cloudflared (setup-desktop.sh installs latest)."
     fi
     return 1
   fi
