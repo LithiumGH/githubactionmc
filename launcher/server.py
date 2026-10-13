@@ -20,6 +20,17 @@ PUBLIC = ROOT / "public"
 STATE = {}
 TUNNELS = {"launcher": os.environ.get("LAUNCHER_URL", ""), "vnc": os.environ.get("VNC_URL", "")}
 
+def progress_logger(tag):
+    d = mc_core.mc_dir()
+    (d / "logs").mkdir(parents=True, exist_ok=True)
+    lp = d / "logs" / f"{tag}.log"
+
+    def _log(m):
+        STATE["log_" + tag] = str(m)[:300]
+        with open(lp, "a") as f:
+            f.write(str(m) + "\n")
+    return _log
+
 def sh_json(handler, obj, code=200):
     body = json.dumps(obj).encode()
     handler.send_response(code)
@@ -65,12 +76,14 @@ class H(BaseHTTPRequestHandler):
             sh_json(self, {"latest": m["latest"], "versions": vers[:50]})
         elif u.path == "/api/log":
             d = mc_core.mc_dir()
-            log = d / "logs" / "game.log"
+            which = q.get("file", ["game"])[0]
+            name = {"game": "game.log", "install": "install.log", "mrpack": "mrpack.log"}.get(which, "game.log")
+            log = d / "logs" / name
             n = int(q.get("lines", ["200"])[0])
             if log.exists():
                 lines = log.read_text(errors="replace").splitlines()[-n:]
             else:
-                lines = ["(no log yet)"]
+                lines = [f"(no {name} yet — run install/launch first)"]
             sh_json(self, {"lines": lines})
         else:
             self.send_error(404)
@@ -89,11 +102,15 @@ class H(BaseHTTPRequestHandler):
                     r = mc_core.install_loader(body.get("mc_version", "1.21"),
                                                body.get("loader", "fabric"),
                                                body.get("loader_version", "latest"),
-                                               progress=lambda m: STATE.update(log=m))
+                                               progress=progress_logger("install"))
                     STATE["install"] = "done"
                     STATE["install_result"] = {k: str(v) for k, v in r.items() if k in ("version", "loader", "loader_version")}
                 except Exception as e:  # noqa
                     STATE["install"] = f"error: {e}"
+                    try:
+                        progress_logger("install")(f"ERROR: {e}")
+                    except Exception:
+                        pass
             threading.Thread(target=run, daemon=True).start()
             sh_json(self, {"started": True})
         elif u.path == "/api/launch":
@@ -140,10 +157,15 @@ class H(BaseHTTPRequestHandler):
             def run():
                 try:
                     STATE["mrpack"] = "running"
-                    r = mc_core.install_mrpack(body["url"], mc_version=body.get("mc_version"), loader=body.get("loader"))
+                    r = mc_core.install_mrpack(body["url"], mc_version=body.get("mc_version"), loader=body.get("loader"),
+                                               progress=progress_logger("mrpack"))
                     STATE["mrpack"] = f"done: {r}"
                 except Exception as e:
                     STATE["mrpack"] = f"error: {e}"
+                    try:
+                        progress_logger("mrpack")(f"ERROR: {e}")
+                    except Exception:
+                        pass
             threading.Thread(target=run, daemon=True).start()
             sh_json(self, {"started": True})
         else:

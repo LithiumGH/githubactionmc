@@ -69,7 +69,9 @@ a{color:#7ddf92}
 
 <div class="card" id="tab-logs" style="display:none">
 <h3>Logs</h3>
-<button class="ghost" onclick="logs()">Refresh game log</button>
+<button class="ghost" onclick="logs('game')">Game log</button>
+<button class="ghost" onclick="logs('install')">Install log</button>
+<button class="ghost" onclick="logs('mrpack')">Modpack log</button>
 <pre id="log"></pre>
 </div>
 </main>
@@ -85,7 +87,7 @@ async function perf(){alert(JSON.stringify(await api('/api/mod','POST',{action:'
 async function search(){const r=await api('/api/mod','POST',{action:'search',query:$('q').value,mc_version:$('mc').value,loader:$('loader').value});$('hits').innerHTML=r.hits.map(h=>`<div class="card"><b>${h.title}</b> <span class="note">${h.downloads} dl</span><br>${h.desc}<br><button onclick="inst('${h.slug}')">Install ${h.slug}</button></div>`).join('')}
 async function inst(s){alert(JSON.stringify(await api('/api/mod','POST',{action:'install',slug:s,mc_version:$('mc').value,loader:$('loader').value})))}
 async function mrpack(){alert(JSON.stringify(await api('/api/mrpack','POST',{url:$('packurl').value})));status()}
-async function logs(){const r=await api('/api/log?lines=120');$('log').textContent=r.lines.join('\n')}
+async function logs(which){const r=await api('/api/log?lines=200&file='+(which||'game'));$('log').textContent='['+(which||'game')+']\n'+r.lines.join('\n')}
 status();setInterval(status,10000);
 fetch('/api/versions').then(r=>r.json()).then(j=>{$('vers').innerHTML=j.versions.slice(0,30).map(v=>`<option>${v}</option>`).join('')});
 </script>

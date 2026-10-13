@@ -247,6 +247,7 @@ def install_loader(mc_version, loader, loader_version="latest", base=None, progr
             cp_extra.append(str(mp))
         arg_patch = {"client_args_extra": prof.get("arguments", {}).get("game", []),
                      "jvm_args_extra": prof.get("arguments", {}).get("jvm", [])}
+        (d / f"{loader}-profile.json").write_text(json.dumps(prof, indent=2))
     elif loader in ("forge", "neoforge"):
         if loader == "forge":
             fv = loader_version if loader_version not in ("latest", "") else forge_version(mc_version, "recommended" if f"{mc_version}-recommended" in http_get_json(FORGE_PROMO)["promos"] else "latest")
@@ -314,17 +315,83 @@ def modrinth_install(slug_or_id, mc_version, loader, base=None, progress=None) -
     http_download(prim["url"], dest)
     return dest
 
+def resolve_mrpack_download(url_or_path: str, progress=None) -> str:
+    """Accept direct .mrpack URL, local path, or a Modrinth page URL.
+    Returns a direct download URL (or local path unchanged)."""
+    pr = progress or print
+    if not url_or_path.startswith("http"):
+        return url_or_path
+    if url_or_path.endswith(".mrpack"):
+        # Could still be an HTML page with .mrpack in query — verify later by magic bytes
+        return url_or_path
+    import urllib.parse as _up
+    # Try to extract slug from modrinth.com/modpack/<slug> or /project/<slug> [/version/<ver>]
+    try:
+        parts = _up.urlparse(url_or_path).path.strip("/").split("/")
+        slug, ver = None, None
+        if "modrinth.com" in url_or_path:
+            if "modpack" in parts:
+                slug = parts[parts.index("modpack") + 1]
+            elif "project" in parts:
+                slug = parts[parts.index("project") + 1]
+            elif "mod" in parts:
+                slug = parts[parts.index("mod") + 1]
+            if "version" in parts:
+                ver = parts[parts.index("version") + 1]
+        if slug:
+            pr(f"[mrpack] resolving Modrinth page '{slug}' via API...")
+            if ver:
+                v = http_get_json(f"{MODRINTH_API}/version/{urllib.parse.quote(ver)}" if False else f"{MODRINTH_API}/project/{slug}/version/{ver}")
+                vers = [v]
+            else:
+                vers = http_get_json(f"{MODRINTH_API}/project/{slug}/version")
+            # prefer a version that actually ships an .mrpack file
+            def has_mrpack(v):
+                return any(f["filename"].endswith(".mrpack") for f in v.get("files", []))
+            with_pack = [v for v in vers if has_mrpack(v)]
+            pool = with_pack or vers
+            if not pool:
+                raise ValueError(f"no versions found for '{slug}'")
+            # newest first
+            pool = sorted(pool, key=lambda x: x.get("date_published", ""), reverse=True)
+            for v in pool:
+                for f in v["files"]:
+                    if f["filename"].endswith(".mrpack"):
+                        pr(f"[mrpack] -> {v.get('name')} ({f['filename']})")
+                        return f["url"]
+            # version has no .mrpack (e.g. a mod, not a modpack)
+            raise ValueError(f"'{slug}' has versions but none ship an .mrpack file — that link is a MOD, not a modpack. Install it via the Mods tab, or paste a direct https://… .mrpack file URL.")
+    except ValueError:
+        raise
+    except Exception as e:
+        raise ValueError(f"could not resolve Modrinth link (is it a modpack page URL? try the direct .mrpack file URL): {e}")
+    return url_or_path  # not a modrinth page — treat as direct URL
+
+
 def install_mrpack(url_or_path, base=None, mc_version=None, loader=None, progress=None) -> dict:
     pr = progress or print
     d = mc_dir(base)
     if url_or_path.startswith("http"):
+        url_or_path = resolve_mrpack_download(url_or_path, progress=pr)
         zpath = Path(tempfile.gettempdir()) / "pack.mrpack"
         pr(f"[mrpack] downloading {url_or_path}")
         http_download(url_or_path, zpath)
+        # friendly check: HTML error pages are not zips
+        with open(zpath, "rb") as f:
+            magic = f.read(4)
+        if magic != b"PK\x03\x04":
+            head = magic + open(zpath, "rb").read(200)
+            raise ValueError("URL did not return a .mrpack zip (got HTML/text — 'not a zip'). Paste the DIRECT .mrpack file URL (ends in .mrpack) or a modrinth.com/modpack/<slug> page link, not a mod page.")
     else:
         zpath = Path(url_or_path)
-    z = zipfile.ZipFile(zpath)
-    idx = json.loads(z.read("modrinth.index.json"))
+    try:
+        z = zipfile.ZipFile(zpath)
+    except zipfile.BadZipFile:
+        raise ValueError("not a zip: file is not a valid .mrpack. Use a direct .mrpack download or Modrinth modpack page URL.")
+    try:
+        idx = json.loads(z.read("modrinth.index.json"))
+    except KeyError:
+        raise ValueError("not a zip: archive has no modrinth.index.json — not a Modrinth modpack (.mrpack).")
     pr(f"[mrpack] {idx.get('name')} deps mc={idx['dependencies'].get('minecraft')} loader={idx['dependencies'].get('fabric-loader') or idx['dependencies'].get('forge') or idx['dependencies'].get('neoforge') or idx['dependencies'].get('quilt-loader')}")
     mods = d / "mods"
     mods.mkdir(parents=True, exist_ok=True)
@@ -384,12 +451,43 @@ def fakegpu_env():
                     v = v.replace("${NPROC:-2}", str(os.cpu_count() or 2))
                     os.environ.setdefault(k, v)
 
+def _merge_arg_list(base_list, extra):
+    """Append extra args (str or Mojang rule-dicts) honouring rules/offered keys."""
+    for a in extra or []:
+        if isinstance(a, str):
+            base_list.append(a)
+        elif isinstance(a, dict):
+            if not rules_allow(a.get("rules")):
+                continue
+            v = a.get("value")
+            if isinstance(v, str):
+                base_list.append(v)
+            elif isinstance(v, list):
+                base_list.extend(x for x in v if isinstance(x, str))
+    return base_list
+
+
 def build_command(mc_version, loader="vanilla", username="Player", ram="4096M",
                   resolution="1280x720", base=None, extra_jvm=None, extra_game=None) -> tuple[str, list]:
     d = mc_dir(base)
-    last = json.loads((d / "last_install.json").read_text()) if (d / "last_install.json").exists() else {}
+    # fall back to last install so "1.21" prefix mismatches can't break launch
+    if (d / "last_install.json").exists():
+        try:
+            last = json.loads((d / "last_install.json").read_text())
+        except Exception:
+            last = {}
+    else:
+        last = {}
+    if not mc_version:
+        mc_version = last.get("mc", "1.21")
+    if not loader:
+        loader = last.get("loader", "vanilla")
+    mc_version, _ = resolve_manifest_version(mc_version)
     vdir = d / "versions" / mc_version
-    vj = json.loads((vdir / f"{mc_version}.json").read_text())
+    vj_path = vdir / f"{mc_version}.json"
+    if not vj_path.exists():
+        raise FileNotFoundError(f"version {mc_version} is not installed yet — hit '1 · Install version' first (looked for {vj_path}).")
+    vj = json.loads(vj_path.read_text())
     java = java_for(mc_version)
     fakegpu_env()
     natives = str(vdir / "natives")
@@ -410,20 +508,31 @@ def build_command(mc_version, loader="vanilla", username="Player", ram="4096M",
             if str(j) not in cp_entries:
                 cp_entries.append(str(j))
     main_class = vj.get("mainClass", "net.minecraft.client.main.Main")
-    # forge/neoforge replace mainClass via version json in versions/<forge>/ dir
-    for cand in (d / "versions").glob("*/**.json"):
-        try:
-            fj = json.loads(cand.read_text())
-            if fj.get("id", "").lower().startswith((loader or "")[:5]) or "forge" in str(cand).lower() or "neoforge" in str(cand).lower():
-                if fj.get("mainClass"):
-                    main_class = fj["mainClass"]
-                    for lib in fj.get("libraries", []):
-                        art = (lib.get("downloads") or {}).get("artifact")
-                        if art and (d / "libraries" / art["path"]).exists():
-                            cp_entries.append(str(d / "libraries" / art["path"]))
-                    break
-        except Exception:
-            continue
+    loader_prof = None
+    for _cand in (d / f"{loader}-profile.json", d / "fabric-profile.json", d / "quilt-profile.json"):
+        if _cand.exists():
+            try:
+                loader_prof = json.loads(_cand.read_text())
+                break
+            except Exception:
+                continue
+    if loader_prof and loader_prof.get("mainClass"):
+        main_class = loader_prof["mainClass"]
+    else:
+        # forge/neoforge replace mainClass via version json in versions/<forge>/ dir
+        for cand in (d / "versions").glob("*/**.json"):
+            try:
+                fj = json.loads(cand.read_text())
+                if fj.get("id", "").lower().startswith((loader or "")[:5]) or "forge" in str(cand).lower() or "neoforge" in str(cand).lower():
+                    if fj.get("mainClass"):
+                        main_class = fj["mainClass"]
+                        for lib in fj.get("libraries", []):
+                            art = (lib.get("downloads") or {}).get("artifact")
+                            if art and (d / "libraries" / art["path"]).exists():
+                                cp_entries.append(str(d / "libraries" / art["path"]))
+                        break
+            except Exception:
+                continue
     # args interpolation
     subs = {
         "auth_player_name": username, "version_name": mc_version,
@@ -449,19 +558,36 @@ def build_command(mc_version, loader="vanilla", username="Player", ram="4096M",
         "-Dorg.lwjgl.util.NoChecks=true", "-Djava.awt.headless=false",
         "-Dorg.lwjgl.opengl.Display.allowSoftwareOpenGL=true",
         f"-Djava.library.path={natives}", "-cp", os.pathsep.join(cp_entries)]
-    for a in (vj.get("arguments", {}).get("jvm", []) or []):
-        if isinstance(a, str):
-            jvm.append(sub(a))
+    _merge_arg_list(jvm, [sub(a) if isinstance(a, str) else {"rules": a.get("rules"), "value": [sub(x) for x in v] if isinstance((v := a.get("value")), list) else sub(v) if isinstance(v, str) else v} for a in (vj.get("arguments", {}).get("jvm", []) or [])])
+    if loader_prof:
+        _merge_arg_list(jvm, [sub(a) if isinstance(a, str) else a for a in (loader_prof.get("arguments", {}).get("jvm", []) or [])])
     jvm += (extra_jvm or [])
     game = []
     args = vj.get("arguments", {}).get("game", []) or vj.get("minecraftArguments", "").split(" ")
-    for a in args:
-        if isinstance(a, str):
-            game.append(sub(a))
-    game += ["--width", W, "--height", H, "--username", username, "--uuid", subs["auth_uuid"],
-             "--accessToken", "0", "--userType", "legacy", "--versionType", "release",
-             "--gameDir", str(d), "--assetsDir", str(d / "assets"),
-             "--assetIndex", subs["assets_index_name"]]
+    _merge_arg_list(game, [sub(a) if isinstance(a, str) else {"rules": a.get("rules"), "value": [sub(x) for x in v] if isinstance((v := a.get("value")), list) else sub(v) if isinstance(v, str) else v} for a in args])
+    if loader_prof:
+        _merge_arg_list(game, [sub(a) if isinstance(a, str) else a for a in (loader_prof.get("arguments", {}).get("game", []) or [])])
+    # add defaults only if Mojang args didn't already include them (avoids duplicates that break launch)
+    def need(flag):
+        return flag not in game
+    if need("--username"):
+        game += ["--username", username]
+    if need("--uuid"):
+        game += ["--uuid", subs["auth_uuid"]]
+    if need("--accessToken"):
+        game += ["--accessToken", "0"]
+    if need("--userType"):
+        game += ["--userType", "legacy"]
+    if need("--versionType"):
+        game += ["--versionType", "release"]
+    if need("--gameDir"):
+        game += ["--gameDir", str(d)]
+    if need("--assetsDir"):
+        game += ["--assetsDir", str(d / "assets")]
+    if need("--assetIndex"):
+        game += ["--assetIndex", subs["assets_index_name"]]
+    if need("--width"):
+        game += ["--width", W, "--height", H]
     game += (extra_game or [])
     return java, [java] + jvm + [main_class] + game
 
@@ -473,8 +599,16 @@ def launch(mc_version, loader="vanilla", username="Player", ram="4096M",
     log.parent.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.setdefault("DISPLAY", ":99")
-    with open(log, "ab") as f:
+    with open(log, "wb") as f:
+        f.write(f"=== launch {mc_version}/{loader} user={username} ===\n".encode())
+        f.write((" ".join(cmd) + "\n").encode())
+        f.flush()
         p = subprocess.Popen(cmd, env=env, stdout=f, stderr=subprocess.STDOUT, cwd=str(d))
     (d / "game.pid").write_text(str(p.pid))
     (d / "launch_cmd.txt").write_text(" ".join(cmd))
+    # early-exit check: if java is missing the game dies in <3s — surface it now
+    time.sleep(3)
+    if p.poll() is not None:
+        tail = log.read_text(errors="replace")[-3000:]
+        raise RuntimeError(f"game exited immediately (code {p.returncode}). log tail:\n{tail}")
     return {"pid": p.pid, "log": str(log), "java": java}
